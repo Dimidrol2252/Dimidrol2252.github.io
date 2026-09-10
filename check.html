@@ -69,12 +69,12 @@
   <button id="again" type="button">Проверить заново</button>
 
   <section class="card">
-    <h2>Firebase — если переводить блокнот на него</h2>
+    <h2>Firebase — на чём блокнот работает</h2>
     <div id="fb"></div>
   </section>
 
   <section class="card">
-    <h2>MQTT-брокеры — на чём блокнот работает сейчас</h2>
+    <h2>MQTT-брокеры — прежний вариант, сейчас не используется</h2>
     <div id="mq"></div>
   </section>
 
@@ -118,6 +118,22 @@
                        (t) => t.indexOf("404 Not Found") !== -1)
     },
     {
+      key: "auth",
+      name: "Вход по паролю",
+      host: "identitytoolkit.googleapis.com : 443",
+      run: () => https("https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=fake",
+                       (t) => t.indexOf("API key not valid") !== -1,
+                       { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })
+    },
+    {
+      key: "token",
+      name: "Продление сессии",
+      host: "securetoken.googleapis.com : 443",
+      run: () => https("https://securetoken.googleapis.com/v1/token?key=fake",
+                       (t) => t.indexOf("API key not valid") !== -1,
+                       { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })
+    },
+    {
       key: "ws",
       name: "WebSocket к Firebase",
       host: "wss:// " + GHOST + ".firebaseio.com : 443",
@@ -135,12 +151,13 @@
 
   // Ответ читаем целиком: если вместо хоста ответил блокирующий прокси,
   // текст не совпадёт с ожидаемым и проверка честно провалится.
-  function https(url, looksRight) {
+  function https(url, looksRight, init) {
     return new Promise(function (resolve) {
       const ctl = new AbortController();
       const t = setTimeout(function () { ctl.abort(); }, TIMEOUT);
       const started = Date.now();
-      fetch(url, { cache: "no-store", signal: ctl.signal })
+      const opts = Object.assign({ cache: "no-store", signal: ctl.signal }, init || {});
+      fetch(url, opts)
         .then(function (r) { return r.text().then(function (txt) { return { r: r, txt: txt }; }); })
         .then(function (o) {
           clearTimeout(t);
@@ -203,29 +220,37 @@
     const by = {};
     all.forEach(function (c) { by[c.key] = c.result && c.result.ok; });
     const v = document.getElementById("verdict");
+    const dbOk = by.db;
     const mqttOk = by.hivemq || by.emqx || by.mosq;
-    const dbOk = by.db || by.eu;
 
     let html = "";
-    if (mqttOk) {
-      html += "<p><b>Блокнот в этой сети работает как есть.</b> Хотя бы один MQTT-брокер доступен, ничего менять не нужно.</p>";
-    } else {
-      html += "<p><b>Блокнот в этой сети не работает:</b> ни один MQTT-брокер недоступен — сеть режет нестандартные порты 8884 / 8084 / 8081.</p>";
-    }
-
     if (dbOk && by.sdk) {
-      html += "<p><b>Firebase здесь доступен</b> — и библиотека, и сама база отвечают по 443 порту. Перевод блокнота на Firebase решит проблему.</p>";
+      html += "<p><b>Блокнот в этой сети работает.</b> И библиотека, и база отвечают по 443 порту.</p>";
     } else if (dbOk && !by.sdk) {
-      html += "<p><b>Firebase доступен частично:</b> база отвечает, а библиотеку с <code>www.gstatic.com</code> сеть не отдаёт. Это лечится — библиотеку можно положить в сам репозиторий и грузить с этого же сайта.</p>";
+      html += "<p><b>Блокнот работать не будет:</b> база отвечает, а библиотеку с <code>www.gstatic.com</code> сеть не отдаёт. Это лечится — библиотеку можно положить в сам репозиторий и грузить с этого же сайта.</p>";
     } else {
-      html += "<p><b>Firebase здесь тоже недоступен</b> — база не отвечает даже по 443. Значит сеть работает по белому списку сайтов, и любой внешний сервис будет закрыт. Остаётся либо просить админов открыть конкретный домен, либо поднимать свой сервер внутри этой сети.</p>";
+      html += "<p><b>Блокнот в этой сети не работает:</b> база на <code>firebaseio.com</code> не отвечает. Значит сеть работает по белому списку сайтов — остаётся либо просить админов открыть этот домен, либо поднимать свой сервер внутри сети.</p>";
     }
 
     if (dbOk && !by.ws) {
-      html += "<p>WebSocket к Firebase не прошёл, но это не помеха: библиотека Firebase сама переключается на обычные HTTPS-запросы, когда WebSocket недоступен. Будет чуть медленнее — задержка в пару секунд вместо мгновенной.</p>";
+      html += "<p>WebSocket не прошёл, но это не помеха: библиотека Firebase сама переключается на обычные HTTPS-запросы. Будет чуть медленнее — задержка в пару секунд вместо мгновенной.</p>";
     }
 
-    v.className = dbOk || mqttOk ? (mqttOk ? "good" : "mid") : "bad";
+    if (by.auth && by.token) {
+      html += "<p><b>Пароль на вход подключить можно</b> — домены авторизации Google отвечают.</p>";
+    } else {
+      html += "<p><b>Пароль на вход здесь не заработает:</b> домены авторизации Google недоступны. Останется только пароль-ширма в самой странице, которая по-настоящему ничего не закрывает — данные всё равно читаются из базы напрямую.</p>";
+    }
+
+    if (!by.eu) {
+      html += "<p>Домен <code>firebasedatabase.app</code> недоступен — это базы европейского и азиатского регионов. Поэтому база и заведена в регионе us-central1, на <code>firebaseio.com</code>. Учитывайте, если будете создавать вторую.</p>";
+    }
+
+    if (!mqttOk) {
+      html += "<p>MQTT-брокеры недоступны — из-за этого блокнот с них и перевели на Firebase. Сейчас они не используются, строки выше оставлены для справки.</p>";
+    }
+
+    v.className = dbOk && by.sdk ? "good" : dbOk ? "mid" : "bad";
     v.innerHTML = html;
   }
 
