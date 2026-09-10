@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Общий блокнот</title>
+<style>
+  :root{
+    --bg:#f6f7f9; --card:#ffffff; --text:#16181d; --muted:#6b7280;
+    --line:#e4e7ec; --accent:#2f6df6; --ok:#16a34a; --warn:#d97706; --err:#dc2626;
+    --shadow:0 1px 2px rgba(16,24,40,.06),0 8px 24px rgba(16,24,40,.06);
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#0f1115; --card:#171a21; --text:#e8eaee; --muted:#9aa1ad;
+      --line:#262b34; --accent:#5b8cff;
+      --shadow:0 1px 2px rgba(0,0,0,.4),0 8px 24px rgba(0,0,0,.35);
+    }
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--bg); color:var(--text);
+    font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Inter,Arial,sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:860px; margin:0 auto; padding:28px 18px 64px}
+  header{display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:18px}
+  h1{font-size:18px; margin:0; font-weight:650; letter-spacing:-.01em}
+  .status{
+    display:inline-flex; align-items:center; gap:7px; margin-left:auto;
+    font-size:13px; color:var(--muted); background:var(--card);
+    border:1px solid var(--line); border-radius:999px; padding:5px 11px;
+  }
+  .dot{width:8px; height:8px; border-radius:50%; background:var(--muted); flex:none}
+  .dot.on{background:var(--ok); box-shadow:0 0 0 3px color-mix(in srgb,var(--ok) 22%,transparent)}
+  .dot.wait{background:var(--warn)}
+  .dot.off{background:var(--err)}
+  .card{
+    background:var(--card); border:1px solid var(--line); border-radius:14px;
+    box-shadow:var(--shadow); overflow:hidden;
+  }
+  .card-head{
+    display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+    padding:12px 16px; border-bottom:1px solid var(--line);
+    font-size:13px; color:var(--muted);
+  }
+  .card-head .right{margin-left:auto; display:flex; gap:8px; align-items:center}
+  #view{
+    margin:0; padding:22px 20px; min-height:220px;
+    white-space:pre-wrap; word-wrap:break-word; overflow-wrap:anywhere;
+    font-size:18px; line-height:1.65;
+    font-family:inherit;
+  }
+  #view.flash{animation:flash .6s ease-out}
+  @keyframes flash{from{background:color-mix(in srgb,var(--accent) 14%,transparent)} to{background:transparent}}
+  .empty{color:var(--muted); font-style:italic}
+  textarea{
+    display:block; width:100%; min-height:320px; resize:vertical;
+    border:0; outline:0; padding:22px 20px; background:transparent; color:var(--text);
+    font:18px/1.65 inherit; font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  button{
+    font:inherit; font-size:13px; padding:6px 12px; border-radius:8px; cursor:pointer;
+    border:1px solid var(--line); background:var(--card); color:var(--text);
+  }
+  button:hover{border-color:var(--accent); color:var(--accent)}
+  button.primary{background:var(--accent); border-color:var(--accent); color:#fff}
+  button.primary:hover{opacity:.9; color:#fff}
+  button:disabled{opacity:.5; cursor:default}
+  footer{margin-top:16px; font-size:13px; color:var(--muted)}
+  footer a{color:var(--accent)}
+  .badge{
+    font-size:12px; padding:3px 9px; border-radius:999px;
+    background:color-mix(in srgb,var(--accent) 14%,transparent); color:var(--accent);
+  }
+  .saved{color:var(--ok)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Общий блокнот</h1>
+    <span id="mode" class="badge" hidden>режим редактора</span>
+    <span class="status"><span id="dot" class="dot wait"></span><span id="statusText">подключение…</span></span>
+  </header>
+
+  <!-- Режим читателя -->
+  <section id="readerBox" class="card">
+    <div class="card-head">
+      <span id="stamp">ожидание текста…</span>
+      <span class="right">
+        <button id="copyBtn" type="button">Копировать</button>
+      </span>
+    </div>
+    <pre id="view" class="empty">Здесь пока ничего нет.</pre>
+  </section>
+
+  <!-- Режим редактора -->
+  <section id="editorBox" class="card" hidden>
+    <div class="card-head">
+      <span id="editState">готово</span>
+      <span class="right">
+        <span id="counter">0</span>
+        <button id="clearBtn" type="button">Очистить</button>
+        <button id="sendBtn" class="primary" type="button">Опубликовать</button>
+      </span>
+    </div>
+    <textarea id="input" placeholder="Пишите здесь — текст сразу увидят все, кто открыл страницу…" spellcheck="false"></textarea>
+  </section>
+
+  <footer id="hint"></footer>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/mqtt@5.10.1/dist/mqtt.min.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  // ─── Настройки ────────────────────────────────────────────────────────────
+  // ROOM — ваш личный «канал». Замените на собственную случайную строку,
+  // иначе чужой человек с таким же ROOM сможет писать в вашу страницу.
+  const CONFIG = {
+    broker: "wss://broker.hivemq.com:8884/mqtt",
+    room: "73beefa132ff2d64"
+  };
+  const TOPIC = "notepad-share/" + CONFIG.room + "/text";
+  // ──────────────────────────────────────────────────────────────────────────
+
+  const $ = (id) => document.getElementById(id);
+  const dot = $("dot"), statusText = $("statusText");
+  const view = $("view"), stamp = $("stamp");
+  const input = $("input"), counter = $("counter"), editState = $("editState");
+
+  const isEditor =
+    location.hash.toLowerCase().indexOf("admin") !== -1 ||
+    new URLSearchParams(location.search).has("admin");
+
+  if (isEditor) {
+    $("editorBox").hidden = false;
+    $("readerBox").hidden = true;
+    $("mode").hidden = false;
+    $("hint").textContent = "Вы редактор. Текст публикуется автоматически через секунду после того, как вы перестали печатать. Обычная ссылка (без #admin) — для читателей.";
+  } else {
+    $("hint").innerHTML = 'Страница обновляется сама, перезагружать не нужно.';
+  }
+
+  function setStatus(state, text) {
+    dot.className = "dot " + state;
+    statusText.textContent = text;
+  }
+
+  function fmtTime(ts) {
+    if (!ts) return "";
+    const d = new Date(ts);
+    return d.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  }
+
+  function render(text, ts) {
+    if (text && text.length) {
+      view.textContent = text;
+      view.classList.remove("empty");
+    } else {
+      view.textContent = "Здесь пока ничего нет.";
+      view.classList.add("empty");
+    }
+    stamp.textContent = ts ? "обновлено в " + fmtTime(ts) : "текста пока нет";
+    view.classList.remove("flash");
+    void view.offsetWidth;
+    view.classList.add("flash");
+  }
+
+  // ─── Подключение ──────────────────────────────────────────────────────────
+  const clientId = "np_" + Math.random().toString(16).slice(2, 10);
+  const client = mqtt.connect(CONFIG.broker, {
+    clientId: clientId,
+    clean: true,
+    keepalive: 30,
+    reconnectPeriod: 3000,
+    connectTimeout: 10000
+  });
+
+  client.on("connect", function () {
+    setStatus("on", "на связи");
+    client.subscribe(TOPIC, { qos: 0 });
+    if (isEditor) flush();               // после переподключения вернём свой текст
+  });
+  client.on("reconnect", function () { setStatus("wait", "переподключение…"); });
+  client.on("close",     function () { setStatus("off", "нет связи"); });
+  client.on("error",     function (e) { setStatus("off", "ошибка связи"); console.error(e); });
+
+  client.on("message", function (topic, payload) {
+    let data;
+    try { data = JSON.parse(payload.toString()); }
+    catch (e) { data = { text: payload.toString(), ts: Date.now() }; }
+    if (data.from === clientId) return;   // своё эхо не обрабатываем
+    if (isEditor) {
+      if (document.activeElement !== input) input.value = data.text || "";
+      counter.textContent = input.value.length;
+    } else {
+      render(data.text || "", data.ts);
+    }
+  });
+
+  // ─── Публикация (только редактор) ────────────────────────────────────────
+  let timer = null;
+
+  function flush() {
+    if (!client.connected) return;
+    const body = JSON.stringify({ text: input.value, ts: Date.now(), from: clientId });
+    client.publish(TOPIC, body, { qos: 0, retain: true }, function (err) {
+      if (err) { editState.textContent = "не отправлено"; editState.className = ""; return; }
+      editState.textContent = "опубликовано в " + fmtTime(Date.now());
+      editState.className = "saved";
+    });
+  }
+
+  if (isEditor) {
+    input.addEventListener("input", function () {
+      counter.textContent = input.value.length;
+      editState.textContent = "черновик…";
+      editState.className = "";
+      clearTimeout(timer);
+      timer = setTimeout(flush, 800);
+    });
+    $("sendBtn").addEventListener("click", function () { clearTimeout(timer); flush(); });
+    $("clearBtn").addEventListener("click", function () {
+      input.value = "";
+      counter.textContent = "0";
+      clearTimeout(timer);
+      flush();
+      input.focus();
+    });
+    input.focus();
+  }
+
+  // ─── Копирование (читатель) ──────────────────────────────────────────────
+  $("copyBtn").addEventListener("click", function () {
+    const t = view.classList.contains("empty") ? "" : view.textContent;
+    if (!t) return;
+    navigator.clipboard.writeText(t).then(function () {
+      const b = $("copyBtn");
+      b.textContent = "Скопировано";
+      setTimeout(function () { b.textContent = "Копировать"; }, 1500);
+    });
+  });
+})();
+</script>
+</body>
+</html>
