@@ -28,9 +28,10 @@
   h1{font-size:18px; margin:0; font-weight:650; letter-spacing:-.01em}
   .status{
     display:inline-flex; align-items:center; gap:7px; margin-left:auto;
-    font-size:13px; color:var(--muted); background:var(--card);
-    border:1px solid var(--line); border-radius:999px; padding:5px 11px;
+    font:inherit; font-size:13px; color:var(--muted); background:var(--card);
+    border:1px solid var(--line); border-radius:999px; padding:5px 11px; cursor:pointer;
   }
+  .status:hover{border-color:var(--accent)}
   .dot{width:8px; height:8px; border-radius:50%; background:var(--muted); flex:none}
   .dot.on{background:var(--ok); box-shadow:0 0 0 3px color-mix(in srgb,var(--ok) 22%,transparent)}
   .dot.wait{background:var(--warn)}
@@ -48,8 +49,7 @@
   #view{
     margin:0; padding:22px 20px; min-height:220px;
     white-space:pre-wrap; word-wrap:break-word; overflow-wrap:anywhere;
-    font-size:18px; line-height:1.65;
-    font-family:inherit;
+    font-size:18px; line-height:1.65; font-family:inherit;
   }
   #view.flash{animation:flash .6s ease-out}
   @keyframes flash{from{background:color-mix(in srgb,var(--accent) 14%,transparent)} to{background:transparent}}
@@ -57,7 +57,7 @@
   textarea{
     display:block; width:100%; min-height:320px; resize:vertical;
     border:0; outline:0; padding:22px 20px; background:transparent; color:var(--text);
-    font:18px/1.65 inherit; font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    font:18px/1.65 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
   }
   button{
     font:inherit; font-size:13px; padding:6px 12px; border-radius:8px; cursor:pointer;
@@ -66,14 +66,23 @@
   button:hover{border-color:var(--accent); color:var(--accent)}
   button.primary{background:var(--accent); border-color:var(--accent); color:#fff}
   button.primary:hover{opacity:.9; color:#fff}
-  button:disabled{opacity:.5; cursor:default}
   footer{margin-top:16px; font-size:13px; color:var(--muted)}
-  footer a{color:var(--accent)}
   .badge{
     font-size:12px; padding:3px 9px; border-radius:999px;
     background:color-mix(in srgb,var(--accent) 14%,transparent); color:var(--accent);
   }
   .saved{color:var(--ok)}
+  /* Диагностика */
+  #diag{margin-top:14px; padding:14px 16px; font-size:13px}
+  #diag h2{margin:0 0 10px; font-size:13px; font-weight:650; color:var(--text)}
+  #diag ul{list-style:none; margin:0; padding:0}
+  #diag li{display:flex; gap:10px; align-items:baseline; padding:5px 0; border-top:1px solid var(--line)}
+  #diag li:first-child{border-top:0}
+  #diag .nm{min-width:110px; font-weight:600}
+  #diag .st{color:var(--muted)}
+  #diag .st.ok{color:var(--ok)}
+  #diag .st.bad{color:var(--err)}
+  #diag .why{margin-top:10px; padding-top:10px; border-top:1px solid var(--line); color:var(--muted)}
 </style>
 </head>
 <body>
@@ -81,16 +90,16 @@
   <header>
     <h1>Общий блокнот</h1>
     <span id="mode" class="badge" hidden>режим редактора</span>
-    <span class="status"><span id="dot" class="dot wait"></span><span id="statusText">подключение…</span></span>
+    <button id="statusBtn" class="status" type="button" title="Показать диагностику соединения">
+      <span id="dot" class="dot wait"></span><span id="statusText">подключение…</span>
+    </button>
   </header>
 
   <!-- Режим читателя -->
   <section id="readerBox" class="card">
     <div class="card-head">
       <span id="stamp">ожидание текста…</span>
-      <span class="right">
-        <button id="copyBtn" type="button">Копировать</button>
-      </span>
+      <span class="right"><button id="copyBtn" type="button">Копировать</button></span>
     </div>
     <pre id="view" class="empty">Здесь пока ничего нет.</pre>
   </section>
@@ -108,6 +117,17 @@
     <textarea id="input" placeholder="Пишите здесь — текст сразу увидят все, кто открыл страницу…" spellcheck="false"></textarea>
   </section>
 
+  <!-- Диагностика соединения -->
+  <section id="diag" class="card" hidden>
+    <h2>Соединение с брокерами</h2>
+    <ul id="diagList"></ul>
+    <div class="why">
+      Страница сама по себе статическая и открывается всегда. Живой текст ходит по
+      WebSocket на нестандартных портах — если все строки красные, сеть их режет
+      (обычно наружу пускают только 80 и 443).
+    </div>
+  </section>
+
   <footer id="hint"></footer>
 </div>
 
@@ -117,13 +137,20 @@
   "use strict";
 
   // ─── Настройки ────────────────────────────────────────────────────────────
-  // ROOM — ваш личный «канал». Замените на собственную случайную строку,
-  // иначе чужой человек с таким же ROOM сможет писать в вашу страницу.
-  const CONFIG = {
-    broker: "wss://broker.hivemq.com:8884/mqtt",
-    room: "73beefa132ff2d64"
-  };
-  const TOPIC = "notepad-share/" + CONFIG.room + "/text";
+  // ROOM — ваш личный «канал». У всех, кто должен видеть один и тот же текст,
+  // он обязан совпадать; посторонний со своим ROOM в вашу страницу не попадёт.
+  const ROOM = "73beefa132ff2d64";
+
+  // Несколько независимых публичных брокеров. Страница держит связь со всеми,
+  // до кого дотянулась: редактор публикует во все сразу, читатель слушает все
+  // и показывает самое свежее сообщение. Если сеть режет один порт — выручает
+  // другой; текст при этом не расходится, потому что публикуется всюду.
+  const ENDPOINTS = [
+    { name: "HiveMQ",    url: "wss://broker.hivemq.com:8884/mqtt" },
+    { name: "EMQX",      url: "wss://broker.emqx.io:8084/mqtt" },
+    { name: "Mosquitto", url: "wss://test.mosquitto.org:8081/mqtt" }
+  ];
+  const TOPIC = "notepad-share/" + ROOM + "/text";
   // ──────────────────────────────────────────────────────────────────────────
 
   const $ = (id) => document.getElementById(id);
@@ -131,9 +158,9 @@
   const view = $("view"), stamp = $("stamp");
   const input = $("input"), counter = $("counter"), editState = $("editState");
 
-  const isEditor =
-    location.hash.toLowerCase().indexOf("admin") !== -1 ||
-    new URLSearchParams(location.search).has("admin");
+  const params = new URLSearchParams(location.search);
+  const isEditor = location.hash.toLowerCase().indexOf("admin") !== -1 || params.has("admin");
+  const wantDiag = params.has("diag") || location.hash.toLowerCase().indexOf("diag") !== -1;
 
   if (isEditor) {
     $("editorBox").hidden = false;
@@ -141,18 +168,12 @@
     $("mode").hidden = false;
     $("hint").textContent = "Вы редактор. Текст публикуется автоматически через секунду после того, как вы перестали печатать. Обычная ссылка (без #admin) — для читателей.";
   } else {
-    $("hint").innerHTML = 'Страница обновляется сама, перезагружать не нужно.';
-  }
-
-  function setStatus(state, text) {
-    dot.className = "dot " + state;
-    statusText.textContent = text;
+    $("hint").textContent = "Страница обновляется сама, перезагружать не нужно.";
   }
 
   function fmtTime(ts) {
     if (!ts) return "";
-    const d = new Date(ts);
-    return d.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    return new Date(ts).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
   }
 
   function render(text, ts) {
@@ -169,66 +190,133 @@
     view.classList.add("flash");
   }
 
-  // ─── Подключение ──────────────────────────────────────────────────────────
+  // ─── Соединения ───────────────────────────────────────────────────────────
   const clientId = "np_" + Math.random().toString(16).slice(2, 10);
-  const client = mqtt.connect(CONFIG.broker, {
-    clientId: clientId,
-    clean: true,
-    keepalive: 30,
-    reconnectPeriod: 3000,
-    connectTimeout: 10000
+  let lastTs = 0;
+  let touched = false;   // редактор начал править сам
+
+  const conns = ENDPOINTS.map(function (ep) {
+    return { ep: ep, client: null, state: "wait", note: "подключение…" };
   });
 
-  client.on("connect", function () {
-    setStatus("on", "на связи");
-    client.subscribe(TOPIC, { qos: 0 });
-    if (isEditor) flush();               // после переподключения вернём свой текст
+  // Строки диагностики
+  const diagList = $("diagList");
+  conns.forEach(function (c, i) {
+    const li = document.createElement("li");
+    li.innerHTML = '<span class="nm"></span><span class="st"></span>';
+    li.querySelector(".nm").textContent = c.ep.name;
+    diagList.appendChild(li);
+    c.row = li.querySelector(".st");
   });
-  client.on("reconnect", function () { setStatus("wait", "переподключение…"); });
-  client.on("close",     function () { setStatus("off", "нет связи"); });
-  client.on("error",     function (e) { setStatus("off", "ошибка связи"); console.error(e); });
+  if (wantDiag) $("diag").hidden = false;
+  $("statusBtn").addEventListener("click", function () {
+    $("diag").hidden = !$("diag").hidden;
+  });
 
-  client.on("message", function (topic, payload) {
-    let data;
-    try { data = JSON.parse(payload.toString()); }
-    catch (e) { data = { text: payload.toString(), ts: Date.now() }; }
-    if (data.from === clientId) return;   // своё эхо не обрабатываем
+  function paint() {
+    const live = conns.filter(function (c) { return c.state === "on"; }).length;
+    if (live > 0) {
+      dot.className = "dot on";
+      statusText.textContent = "на связи" + (live < conns.length ? " (" + live + " из " + conns.length + ")" : "");
+    } else if (conns.some(function (c) { return c.state === "wait"; })) {
+      dot.className = "dot wait";
+      statusText.textContent = "подключение…";
+    } else {
+      dot.className = "dot off";
+      statusText.textContent = "нет связи";
+    }
+    conns.forEach(function (c) {
+      c.row.textContent = c.note + " · " + c.ep.url.replace("wss://", "");
+      c.row.className = "st" + (c.state === "on" ? " ok" : c.state === "off" ? " bad" : "");
+    });
+  }
+  paint();
+
+  function apply(data) {
+    if (data.from === clientId) return;      // своё эхо
+    if (data.ts && data.ts <= lastTs) return; // дубль того же сообщения с другого брокера
+    lastTs = data.ts || Date.now();
     if (isEditor) {
-      if (document.activeElement !== input) input.value = data.text || "";
-      counter.textContent = input.value.length;
+      // Пока редактор ничего не набрал, подхватываем уже опубликованный текст —
+      // иначе после перезагрузки пустое поле затёрло бы общий текст.
+      if (!touched) {
+        input.value = data.text || "";
+        counter.textContent = input.value.length;
+      }
     } else {
       render(data.text || "", data.ts);
     }
+  }
+
+  conns.forEach(function (c) {
+    let client;
+    try {
+      client = mqtt.connect(c.ep.url, {
+        clientId: clientId + "_" + c.ep.name.toLowerCase(),
+        clean: true, keepalive: 30, reconnectPeriod: 5000, connectTimeout: 8000
+      });
+    } catch (e) {
+      c.state = "off"; c.note = "не удалось открыть"; paint(); return;
+    }
+    c.client = client;
+
+    client.on("connect", function () {
+      c.state = "on"; c.note = "подключено"; paint();
+      client.subscribe(TOPIC, { qos: 0 });
+      if (isEditor && input.value) publish();   // вернём свой текст новому брокеру
+    });
+    client.on("reconnect", function () {
+      if (c.state !== "on") { c.note = "переподключение…"; paint(); }
+    });
+    client.on("close", function () {
+      c.state = "off";
+      if (c.note === "подключено" || c.note === "подключение…") c.note = "соединение закрыто";
+      paint();
+    });
+    client.on("error", function (e) {
+      c.state = "off";
+      c.note = "недоступен" + (e && e.message ? " (" + e.message + ")" : "");
+      paint();
+    });
+    client.on("message", function (topic, payload) {
+      let data;
+      try { data = JSON.parse(payload.toString()); }
+      catch (e) { data = { text: payload.toString(), ts: Date.now() }; }
+      apply(data);
+    });
   });
 
   // ─── Публикация (только редактор) ────────────────────────────────────────
   let timer = null;
 
-  function flush() {
-    if (!client.connected) return;
-    const body = JSON.stringify({ text: input.value, ts: Date.now(), from: clientId });
-    client.publish(TOPIC, body, { qos: 0, retain: true }, function (err) {
-      if (err) { editState.textContent = "не отправлено"; editState.className = ""; return; }
-      editState.textContent = "опубликовано в " + fmtTime(Date.now());
-      editState.className = "saved";
-    });
+  function publish() {
+    const live = conns.filter(function (c) { return c.client && c.client.connected; });
+    if (!live.length) {
+      editState.textContent = "нет связи — не отправлено";
+      editState.className = "";
+      return;
+    }
+    const ts = Date.now();
+    lastTs = ts;
+    const body = JSON.stringify({ text: input.value, ts: ts, from: clientId });
+    live.forEach(function (c) { c.client.publish(TOPIC, body, { qos: 0, retain: true }); });
+    editState.textContent = "опубликовано в " + fmtTime(ts);
+    editState.className = "saved";
   }
 
   if (isEditor) {
     input.addEventListener("input", function () {
+      touched = true;
       counter.textContent = input.value.length;
       editState.textContent = "черновик…";
       editState.className = "";
       clearTimeout(timer);
-      timer = setTimeout(flush, 800);
+      timer = setTimeout(publish, 800);
     });
-    $("sendBtn").addEventListener("click", function () { clearTimeout(timer); flush(); });
+    $("sendBtn").addEventListener("click", function () { clearTimeout(timer); publish(); });
     $("clearBtn").addEventListener("click", function () {
-      input.value = "";
-      counter.textContent = "0";
-      clearTimeout(timer);
-      flush();
-      input.focus();
+      input.value = ""; counter.textContent = "0";
+      clearTimeout(timer); publish(); input.focus();
     });
     input.focus();
   }
