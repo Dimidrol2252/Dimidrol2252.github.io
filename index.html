@@ -119,12 +119,15 @@
 
   <!-- Диагностика соединения -->
   <section id="diag" class="card" hidden>
-    <h2>Соединение с брокерами</h2>
-    <ul id="diagList"></ul>
+    <h2>Соединение с базой</h2>
+    <ul id="diagList">
+      <li><span class="nm">Состояние</span><span id="dState" class="st">подключение…</span></li>
+      <li><span class="nm">База</span><span id="dHost" class="st"></span></li>
+      <li><span class="nm">Последняя ошибка</span><span id="dErr" class="st">нет</span></li>
+    </ul>
     <div class="why">
-      Страница сама по себе статическая и открывается всегда. Живой текст ходит по
-      WebSocket на нестандартных портах — если все строки красные, сеть их режет
-      (обычно наружу пускают только 80 и 443).
+      Страница статическая и открывается всегда, а текст живёт в Firebase Realtime Database.
+      Если тут «нет связи» — сеть не пускает к базе.
       <a href="./check.html" style="color:var(--accent)">Подробная проверка сети →</a>
     </div>
   </section>
@@ -132,207 +135,162 @@
   <footer id="hint"></footer>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/mqtt@5.10.1/dist/mqtt.min.js"></script>
-<script>
-(function () {
-  "use strict";
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+import { getDatabase, ref, onValue, set } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
 
-  // ─── Настройки ────────────────────────────────────────────────────────────
-  // ROOM — ваш личный «канал». У всех, кто должен видеть один и тот же текст,
-  // он обязан совпадать; посторонний со своим ROOM в вашу страницу не попадёт.
-  const ROOM = "73beefa132ff2d64";
+// ─── Настройки ──────────────────────────────────────────────────────────────
+// Блок из консоли Firebase: Project settings → Your apps → Web.
+// Это публичные ключи — их не прячут, доступ ограничивают правилами базы.
+const firebaseConfig = {
+  projectId: "notepade-share",
+  databaseURL: "https://notepade-share-default-rtdb.firebaseio.com"
+};
+const PATH = "note";           // узел в базе, где лежит текст
+// ────────────────────────────────────────────────────────────────────────────
 
-  // Несколько независимых публичных брокеров. Страница держит связь со всеми,
-  // до кого дотянулась: редактор публикует во все сразу, читатель слушает все
-  // и показывает самое свежее сообщение. Если сеть режет один порт — выручает
-  // другой; текст при этом не расходится, потому что публикуется всюду.
-  const ENDPOINTS = [
-    { name: "HiveMQ",    url: "wss://broker.hivemq.com:8884/mqtt" },
-    { name: "EMQX",      url: "wss://broker.emqx.io:8084/mqtt" },
-    { name: "Mosquitto", url: "wss://test.mosquitto.org:8081/mqtt" }
-  ];
-  const TOPIC = "notepad-share/" + ROOM + "/text";
-  // ──────────────────────────────────────────────────────────────────────────
+const $ = (id) => document.getElementById(id);
+const dot = $("dot"), statusText = $("statusText");
+const view = $("view"), stamp = $("stamp");
+const input = $("input"), counter = $("counter"), editState = $("editState");
 
-  const $ = (id) => document.getElementById(id);
-  const dot = $("dot"), statusText = $("statusText");
-  const view = $("view"), stamp = $("stamp");
-  const input = $("input"), counter = $("counter"), editState = $("editState");
+const params = new URLSearchParams(location.search);
+const isEditor = location.hash.toLowerCase().indexOf("admin") !== -1 || params.has("admin");
+const wantDiag = params.has("diag") || location.hash.toLowerCase().indexOf("diag") !== -1;
 
-  const params = new URLSearchParams(location.search);
-  const isEditor = location.hash.toLowerCase().indexOf("admin") !== -1 || params.has("admin");
-  const wantDiag = params.has("diag") || location.hash.toLowerCase().indexOf("diag") !== -1;
+if (isEditor) {
+  $("editorBox").hidden = false;
+  $("readerBox").hidden = true;
+  $("mode").hidden = false;
+  $("hint").textContent = "Вы редактор. Текст публикуется автоматически через секунду после того, как вы перестали печатать. Обычная ссылка (без #admin) — для читателей.";
+} else {
+  $("hint").textContent = "Страница обновляется сама, перезагружать не нужно.";
+}
+if (wantDiag) $("diag").hidden = false;
+$("statusBtn").addEventListener("click", () => { $("diag").hidden = !$("diag").hidden; });
 
-  if (isEditor) {
-    $("editorBox").hidden = false;
-    $("readerBox").hidden = true;
-    $("mode").hidden = false;
-    $("hint").textContent = "Вы редактор. Текст публикуется автоматически через секунду после того, как вы перестали печатать. Обычная ссылка (без #admin) — для читателей.";
+function fmtTime(ts) {
+  if (!ts) return "";
+  return new Date(ts).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+function setStatus(state, text) {
+  dot.className = "dot " + state;
+  statusText.textContent = text;
+  $("dState").textContent = text;
+  $("dState").className = "st" + (state === "on" ? " ok" : state === "off" ? " bad" : "");
+}
+
+function fail(where, e) {
+  const msg = (e && (e.message || e.code)) || String(e);
+  $("dErr").textContent = where + ": " + msg;
+  $("dErr").className = "st bad";
+  console.error(where, e);
+}
+
+function render(text, ts) {
+  if (text && text.length) {
+    view.textContent = text;
+    view.classList.remove("empty");
   } else {
-    $("hint").textContent = "Страница обновляется сама, перезагружать не нужно.";
+    view.textContent = "Здесь пока ничего нет.";
+    view.classList.add("empty");
   }
+  stamp.textContent = ts ? "обновлено в " + fmtTime(ts) : "текста пока нет";
+  view.classList.remove("flash");
+  void view.offsetWidth;
+  view.classList.add("flash");
+}
 
-  function fmtTime(ts) {
-    if (!ts) return "";
-    return new Date(ts).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-  }
+// ─── Подключение ────────────────────────────────────────────────────────────
+if (!firebaseConfig.databaseURL) {
+  setStatus("off", "не настроено");
+  $("hint").textContent = "В index.html не заполнен адрес базы (databaseURL) — страница не знает, к чему подключаться.";
+  throw new Error("databaseURL не заполнен");
+}
 
-  function render(text, ts) {
-    if (text && text.length) {
-      view.textContent = text;
-      view.classList.remove("empty");
-    } else {
-      view.textContent = "Здесь пока ничего нет.";
-      view.classList.add("empty");
-    }
-    stamp.textContent = ts ? "обновлено в " + fmtTime(ts) : "текста пока нет";
-    view.classList.remove("flash");
-    void view.offsetWidth;
-    view.classList.add("flash");
-  }
+$("dHost").textContent = firebaseConfig.databaseURL;
 
-  // ─── Соединения ───────────────────────────────────────────────────────────
-  const clientId = "np_" + Math.random().toString(16).slice(2, 10);
-  let lastTs = 0;
-  let touched = false;   // редактор начал править сам
+let db, noteRef;
+try {
+  db = getDatabase(initializeApp(firebaseConfig));
+  noteRef = ref(db, PATH);
+} catch (e) {
+  setStatus("off", "ошибка настройки");
+  fail("Инициализация", e);
+  throw e;
+}
 
-  const conns = ENDPOINTS.map(function (ep) {
-    return { ep: ep, client: null, state: "wait", note: "подключение…" };
-  });
+let touched = false;   // редактор начал править сам
 
-  // Строки диагностики
-  const diagList = $("diagList");
-  conns.forEach(function (c, i) {
-    const li = document.createElement("li");
-    li.innerHTML = '<span class="nm"></span><span class="st"></span>';
-    li.querySelector(".nm").textContent = c.ep.name;
-    diagList.appendChild(li);
-    c.row = li.querySelector(".st");
-  });
-  if (wantDiag) $("diag").hidden = false;
-  $("statusBtn").addEventListener("click", function () {
-    $("diag").hidden = !$("diag").hidden;
-  });
+// Служебный узел Firebase: показывает реальное состояние соединения.
+onValue(ref(db, ".info/connected"), (snap) => {
+  setStatus(snap.val() ? "on" : "off", snap.val() ? "на связи" : "нет связи");
+});
 
-  function paint() {
-    const live = conns.filter(function (c) { return c.state === "on"; }).length;
-    if (live > 0) {
-      dot.className = "dot on";
-      statusText.textContent = "на связи" + (live < conns.length ? " (" + live + " из " + conns.length + ")" : "");
-    } else if (conns.some(function (c) { return c.state === "wait"; })) {
-      dot.className = "dot wait";
-      statusText.textContent = "подключение…";
-    } else {
-      dot.className = "dot off";
-      statusText.textContent = "нет связи";
-    }
-    conns.forEach(function (c) {
-      c.row.textContent = c.note + " · " + c.ep.url.replace("wss://", "");
-      c.row.className = "st" + (c.state === "on" ? " ok" : c.state === "off" ? " bad" : "");
-    });
-  }
-  paint();
-
-  function apply(data) {
-    if (data.from === clientId) return;      // своё эхо
-    if (data.ts && data.ts <= lastTs) return; // дубль того же сообщения с другого брокера
-    lastTs = data.ts || Date.now();
-    if (isEditor) {
-      // Пока редактор ничего не набрал, подхватываем уже опубликованный текст —
-      // иначе после перезагрузки пустое поле затёрло бы общий текст.
-      if (!touched) {
-        input.value = data.text || "";
-        counter.textContent = input.value.length;
-      }
-    } else {
-      render(data.text || "", data.ts);
-    }
-  }
-
-  conns.forEach(function (c) {
-    let client;
-    try {
-      client = mqtt.connect(c.ep.url, {
-        clientId: clientId + "_" + c.ep.name.toLowerCase(),
-        clean: true, keepalive: 30, reconnectPeriod: 5000, connectTimeout: 8000
-      });
-    } catch (e) {
-      c.state = "off"; c.note = "не удалось открыть"; paint(); return;
-    }
-    c.client = client;
-
-    client.on("connect", function () {
-      c.state = "on"; c.note = "подключено"; paint();
-      client.subscribe(TOPIC, { qos: 0 });
-      if (isEditor && input.value) publish();   // вернём свой текст новому брокеру
-    });
-    client.on("reconnect", function () {
-      if (c.state !== "on") { c.note = "переподключение…"; paint(); }
-    });
-    client.on("close", function () {
-      c.state = "off";
-      if (c.note === "подключено" || c.note === "подключение…") c.note = "соединение закрыто";
-      paint();
-    });
-    client.on("error", function (e) {
-      c.state = "off";
-      c.note = "недоступен" + (e && e.message ? " (" + e.message + ")" : "");
-      paint();
-    });
-    client.on("message", function (topic, payload) {
-      let data;
-      try { data = JSON.parse(payload.toString()); }
-      catch (e) { data = { text: payload.toString(), ts: Date.now() }; }
-      apply(data);
-    });
-  });
-
-  // ─── Публикация (только редактор) ────────────────────────────────────────
-  let timer = null;
-
-  function publish() {
-    const live = conns.filter(function (c) { return c.client && c.client.connected; });
-    if (!live.length) {
-      editState.textContent = "нет связи — не отправлено";
-      editState.className = "";
-      return;
-    }
-    const ts = Date.now();
-    lastTs = ts;
-    const body = JSON.stringify({ text: input.value, ts: ts, from: clientId });
-    live.forEach(function (c) { c.client.publish(TOPIC, body, { qos: 0, retain: true }); });
-    editState.textContent = "опубликовано в " + fmtTime(ts);
-    editState.className = "saved";
-  }
-
+onValue(noteRef, (snap) => {
+  const data = snap.val() || { text: "", ts: 0 };
   if (isEditor) {
-    input.addEventListener("input", function () {
-      touched = true;
+    // Пока редактор ничего не набрал, подхватываем уже опубликованный текст —
+    // иначе после перезагрузки пустое поле затёрло бы общий текст.
+    if (!touched) {
+      input.value = data.text || "";
       counter.textContent = input.value.length;
-      editState.textContent = "черновик…";
-      editState.className = "";
-      clearTimeout(timer);
-      timer = setTimeout(publish, 800);
-    });
-    $("sendBtn").addEventListener("click", function () { clearTimeout(timer); publish(); });
-    $("clearBtn").addEventListener("click", function () {
-      input.value = ""; counter.textContent = "0";
-      clearTimeout(timer); publish(); input.focus();
-    });
-    input.focus();
+    }
+  } else {
+    render(data.text || "", data.ts);
   }
+}, (e) => {
+  setStatus("off", "нет доступа к базе");
+  fail("Чтение", e);
+});
 
-  // ─── Копирование (читатель) ──────────────────────────────────────────────
-  $("copyBtn").addEventListener("click", function () {
-    const t = view.classList.contains("empty") ? "" : view.textContent;
-    if (!t) return;
-    navigator.clipboard.writeText(t).then(function () {
-      const b = $("copyBtn");
-      b.textContent = "Скопировано";
-      setTimeout(function () { b.textContent = "Копировать"; }, 1500);
+// ─── Публикация (только редактор) ──────────────────────────────────────────
+let timer = null;
+
+function publish() {
+  const ts = Date.now();
+  editState.textContent = "отправляю…";
+  editState.className = "";
+  set(noteRef, { text: input.value, ts: ts })
+    .then(() => {
+      editState.textContent = "опубликовано в " + fmtTime(ts);
+      editState.className = "saved";
+    })
+    .catch((e) => {
+      editState.textContent = "не отправлено — " + (e.code === "PERMISSION_DENIED" ? "запись запрещена правилами базы" : e.message);
+      editState.className = "";
+      fail("Запись", e);
     });
+}
+
+if (isEditor) {
+  input.addEventListener("input", () => {
+    touched = true;
+    counter.textContent = input.value.length;
+    editState.textContent = "черновик…";
+    editState.className = "";
+    clearTimeout(timer);
+    timer = setTimeout(publish, 800);
   });
-})();
+  $("sendBtn").addEventListener("click", () => { clearTimeout(timer); publish(); });
+  $("clearBtn").addEventListener("click", () => {
+    input.value = ""; counter.textContent = "0";
+    clearTimeout(timer); publish(); input.focus();
+  });
+  input.focus();
+}
+
+// ─── Копирование (читатель) ────────────────────────────────────────────────
+$("copyBtn").addEventListener("click", () => {
+  const t = view.classList.contains("empty") ? "" : view.textContent;
+  if (!t) return;
+  navigator.clipboard.writeText(t).then(() => {
+    const b = $("copyBtn");
+    b.textContent = "Скопировано";
+    setTimeout(() => { b.textContent = "Копировать"; }, 1500);
+  });
+});
 </script>
 </body>
 </html>
