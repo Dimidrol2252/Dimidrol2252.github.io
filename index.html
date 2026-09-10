@@ -72,6 +72,42 @@
     background:color-mix(in srgb,var(--accent) 14%,transparent); color:var(--accent);
   }
   .saved{color:var(--ok)}
+  /* Файлы */
+  #drop{position:relative}
+  #drop.over::after{
+    content:"Отпустите — файлы уйдут всем"; position:absolute; inset:0; z-index:5;
+    display:flex; align-items:center; justify-content:center; font-size:15px; font-weight:600;
+    color:var(--accent); background:color-mix(in srgb,var(--accent) 12%,var(--card));
+    border:2px dashed var(--accent); border-radius:14px;
+  }
+  .grid{display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:12px; padding:16px}
+  .file{
+    border:1px solid var(--line); border-radius:10px; overflow:hidden; background:var(--bg);
+    display:flex; flex-direction:column; position:relative;
+  }
+  .file .thumb{
+    display:block; width:100%; height:104px; object-fit:cover; cursor:pointer;
+    background:var(--card); border:0;
+  }
+  .file .ico{
+    height:104px; display:flex; align-items:center; justify-content:center;
+    font-size:26px; color:var(--muted); cursor:pointer; background:var(--card);
+  }
+  .file .fi{padding:8px 10px; font-size:12px; min-width:0}
+  .file .fn{font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+  .file .fs{color:var(--muted); margin-top:2px}
+  .file .del{
+    position:absolute; top:6px; right:6px; padding:2px 7px; font-size:12px; line-height:1.4;
+    border-radius:6px; background:var(--card); opacity:.85;
+  }
+  .file .del:hover{border-color:var(--err); color:var(--err); opacity:1}
+  #noFiles{padding:18px 20px; color:var(--muted); font-style:italic; font-size:14px}
+  #lightbox{
+    position:fixed; inset:0; z-index:50; background:rgba(0,0,0,.82);
+    display:flex; align-items:center; justify-content:center; padding:24px; cursor:zoom-out;
+  }
+  #lightbox img{max-width:100%; max-height:100%; border-radius:8px; box-shadow:0 12px 48px rgba(0,0,0,.5)}
+  input[type=file]{display:none}
   /* Диагностика */
   #diag{margin-top:14px; padding:14px 16px; font-size:13px}
   #diag h2{margin:0 0 10px; font-size:13px; font-weight:650; color:var(--text)}
@@ -86,7 +122,7 @@
 </style>
 </head>
 <body>
-<div class="wrap">
+<div class="wrap" id="drop">
   <header>
     <h1>Общий блокнот</h1>
     <span id="mode" class="badge" hidden>режим редактора</span>
@@ -117,6 +153,20 @@
     <textarea id="input" placeholder="Пишите здесь — текст сразу увидят все, кто открыл страницу…" spellcheck="false"></textarea>
   </section>
 
+  <!-- Файлы -->
+  <section id="filesBox" class="card" style="margin-top:16px">
+    <div class="card-head">
+      <span id="filesStat">файлов нет</span>
+      <span class="right">
+        <span id="upState"></span>
+        <button id="pickBtn" class="primary" type="button" hidden>Прикрепить файл</button>
+      </span>
+    </div>
+    <div id="noFiles">Ничего не прикреплено.</div>
+    <div id="grid" class="grid" hidden></div>
+    <input id="picker" type="file" multiple>
+  </section>
+
   <!-- Диагностика соединения -->
   <section id="diag" class="card" hidden>
     <h2>Соединение с базой</h2>
@@ -134,10 +184,11 @@
 
   <footer id="hint"></footer>
 </div>
+<div id="lightbox" hidden></div>
 
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-import { getDatabase, ref, onValue, set } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
+import { getDatabase, ref, onValue, set, get, remove } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
 
 // ─── Настройки ──────────────────────────────────────────────────────────────
 // Блок из консоли Firebase: Project settings → Your apps → Web.
@@ -162,7 +213,7 @@ if (isEditor) {
   $("editorBox").hidden = false;
   $("readerBox").hidden = true;
   $("mode").hidden = false;
-  $("hint").textContent = "Вы редактор. Текст публикуется автоматически через секунду после того, как вы перестали печатать. Обычная ссылка (без #admin) — для читателей.";
+  $("hint").textContent = "Вы редактор. Текст публикуется автоматически через секунду после того, как вы перестали печатать. Файлы — кнопкой, перетаскиванием или вставкой скриншота по Cmd+V. Обычная ссылка (без #admin) — для читателей.";
 } else {
   $("hint").textContent = "Страница обновляется сама, перезагружать не нужно.";
 }
@@ -279,6 +330,253 @@ if (isEditor) {
     clearTimeout(timer); publish(); input.focus();
   });
   input.focus();
+}
+
+// ─── Файлы ─────────────────────────────────────────────────────────────────
+// Превью и содержимое лежат в разных узлах: страница при загрузке тянет только
+// лёгкие превью (filemeta), а сам файл качается по клику из filedata.
+const metaRef = ref(db, "filemeta");
+const MAX_BYTES = 5 * 1024 * 1024;   // до base64; узел базы держит 10 МБ
+const IMG_SIDE  = 1600;              // длинная сторона картинки после сжатия
+const THUMB_SIDE = 400;              // длинная сторона превью
+
+const grid = $("grid"), noFiles = $("noFiles"), filesStat = $("filesStat"), upState = $("upState");
+const picker = $("picker"), lightbox = $("lightbox");
+
+if (isEditor) $("pickBtn").hidden = false;
+
+function plural(n, one, few, many) {
+  const a = Math.abs(n) % 100, b = a % 10;
+  if (a > 10 && a < 20) return many;
+  if (b > 1 && b < 5) return few;
+  return b === 1 ? one : many;
+}
+
+function fmtSize(b) {
+  if (b < 1024) return b + " Б";
+  if (b < 1024 * 1024) return (b / 1024).toFixed(0) + " КБ";
+  return (b / 1024 / 1024).toFixed(1) + " МБ";
+}
+
+function iconFor(type, name) {
+  if (type.startsWith("video/")) return "▶";
+  if (type.startsWith("audio/")) return "♪";
+  if (type.indexOf("pdf") !== -1) return "PDF";
+  if (/\.(zip|rar|7z|tar|gz)$/i.test(name)) return "ZIP";
+  if (/\.(doc|docx|rtf|odt)$/i.test(name)) return "DOC";
+  if (/\.(xls|xlsx|csv|ods)$/i.test(name)) return "XLS";
+  return "FILE";
+}
+
+// Картинку уменьшаем и пережимаем в WebP: скриншот на 2 МБ становится ~150 КБ.
+function shrink(file, side, quality) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      const k = Math.min(1, side / Math.max(img.width, img.height));
+      const c = document.createElement("canvas");
+      c.width = Math.round(img.width * k);
+      c.height = Math.round(img.height * k);
+      c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+      URL.revokeObjectURL(url);
+      c.toBlob((b) => b ? resolve(b) : reject(new Error("не удалось сжать")), "image/webp", quality);
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("не похоже на картинку")); };
+    img.src = url;
+  });
+}
+
+function toDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result);
+    r.onerror = () => reject(r.error || new Error("не удалось прочитать файл"));
+    r.readAsDataURL(blob);
+  });
+}
+
+async function upload(file) {
+  const isImg = file.type.startsWith("image/");
+  let body = file, thumb = "";
+
+  if (isImg) {
+    try {
+      const small = await shrink(file, IMG_SIDE, 0.82);
+      if (small.size < file.size) body = small;              // не раздуваем то, что уже мало
+      thumb = await toDataUrl(await shrink(file, THUMB_SIDE, 0.6));
+    } catch (e) {
+      fail("Сжатие", e);                                     // отправим как есть
+    }
+  }
+
+  if (body.size > MAX_BYTES) {
+    throw new Error("файл " + fmtSize(body.size) + " — больше предела в " + fmtSize(MAX_BYTES));
+  }
+
+  const data = await toDataUrl(body);
+  const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+
+  // Сначала содержимое, потом превью — чтобы карточка не появилась раньше файла.
+  await set(ref(db, "filedata/" + id), data);
+  await set(ref(db, "filemeta/" + id), {
+    name: file.name || (isImg ? "screenshot.webp" : "file"),
+    type: body === file ? (file.type || "application/octet-stream") : "image/webp",
+    size: body.size,
+    isImg: isImg,
+    thumb: thumb,
+    ts: Date.now()
+  });
+}
+
+async function uploadAll(list) {
+  const files = Array.from(list).filter(Boolean);
+  if (!files.length) return;
+  for (let i = 0; i < files.length; i++) {
+    upState.textContent = "отправляю " + (i + 1) + " из " + files.length + "…";
+    try {
+      await upload(files[i]);
+    } catch (e) {
+      upState.textContent = "не отправлено: " + (e.message || e.code);
+      fail("Загрузка", e);
+      return;
+    }
+  }
+  upState.textContent = files.length === 1 ? "файл отправлен" : "отправлено " + files.length + " " + plural(files.length, "файла", "файлов", "файлов");
+  setTimeout(() => { upState.textContent = ""; }, 4000);
+}
+
+async function fetchData(id) {
+  const snap = await get(ref(db, "filedata/" + id));
+  const v = snap.val();
+  if (!v) throw new Error("содержимое файла не найдено");
+  return v;
+}
+
+function dataUrlToBlob(u) {
+  const [head, b64] = u.split(",");
+  const mime = (head.match(/:(.*?);/) || [])[1] || "application/octet-stream";
+  const bin = atob(b64);
+  const arr = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+  return new Blob([arr], { type: mime });
+}
+
+async function openFile(id, meta, card) {
+  const was = card.textContent;
+  card.textContent = "…";
+  try {
+    const data = await fetchData(id);
+    if (meta.isImg) {
+      lightbox.innerHTML = "";
+      const img = new Image();
+      img.src = data;
+      lightbox.appendChild(img);
+      lightbox.hidden = false;
+    } else {
+      const url = URL.createObjectURL(dataUrlToBlob(data));
+      const a = document.createElement("a");
+      a.href = url; a.download = meta.name;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+    }
+  } catch (e) {
+    fail("Скачивание", e);
+    alert("Не удалось открыть файл: " + (e.message || e.code));
+  }
+  card.textContent = was;
+}
+
+lightbox.addEventListener("click", () => { lightbox.hidden = true; lightbox.innerHTML = ""; });
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !lightbox.hidden) { lightbox.hidden = true; lightbox.innerHTML = ""; }
+});
+
+onValue(metaRef, (snap) => {
+  const all = snap.val() || {};
+  const ids = Object.keys(all).sort((a, b) => (all[b].ts || 0) - (all[a].ts || 0));
+
+  grid.innerHTML = "";
+  grid.hidden = !ids.length;
+  noFiles.hidden = !!ids.length;
+
+  let total = 0;
+  ids.forEach((id) => {
+    const m = all[id];
+    total += m.size || 0;
+
+    const card = document.createElement("div");
+    card.className = "file";
+
+    let opener;
+    if (m.isImg && m.thumb) {
+      opener = document.createElement("img");
+      opener.className = "thumb";
+      opener.src = m.thumb;
+      opener.alt = m.name;
+      opener.title = "Открыть в полном размере";
+    } else {
+      opener = document.createElement("div");
+      opener.className = "ico";
+      opener.textContent = iconFor(m.type || "", m.name || "");
+      opener.title = "Скачать";
+    }
+    opener.addEventListener("click", () => openFile(id, m, opener));
+    card.appendChild(opener);
+
+    const fi = document.createElement("div");
+    fi.className = "fi";
+    fi.innerHTML = '<div class="fn"></div><div class="fs"></div>';
+    fi.querySelector(".fn").textContent = m.name || "файл";
+    fi.querySelector(".fn").title = m.name || "";
+    fi.querySelector(".fs").textContent = fmtSize(m.size || 0) + " · " + fmtTime(m.ts);
+    card.appendChild(fi);
+
+    if (isEditor) {
+      const del = document.createElement("button");
+      del.className = "del";
+      del.type = "button";
+      del.textContent = "✕";
+      del.title = "Удалить у всех";
+      del.addEventListener("click", async () => {
+        if (!confirm("Удалить «" + (m.name || "файл") + "» у всех?")) return;
+        try {
+          await remove(ref(db, "filemeta/" + id));
+          await remove(ref(db, "filedata/" + id));
+        } catch (e) { fail("Удаление", e); }
+      });
+      card.appendChild(del);
+    }
+
+    grid.appendChild(card);
+  });
+
+  filesStat.textContent = ids.length
+    ? ids.length + " " + plural(ids.length, "файл", "файла", "файлов") + " · " + fmtSize(total)
+    : "файлов нет";
+}, (e) => fail("Чтение файлов", e));
+
+if (isEditor) {
+  $("pickBtn").addEventListener("click", () => picker.click());
+  picker.addEventListener("change", () => { uploadAll(picker.files); picker.value = ""; });
+
+  // Вставка скриншота из буфера
+  document.addEventListener("paste", (e) => {
+    const items = Array.from((e.clipboardData || {}).items || []);
+    const files = items.filter((i) => i.kind === "file").map((i) => i.getAsFile());
+    if (files.length) { e.preventDefault(); uploadAll(files); }
+  });
+
+  // Перетаскивание мышью
+  const drop = $("drop");
+  let depth = 0;
+  window.addEventListener("dragenter", (e) => { e.preventDefault(); if (++depth === 1) drop.classList.add("over"); });
+  window.addEventListener("dragover", (e) => { e.preventDefault(); });
+  window.addEventListener("dragleave", () => { if (--depth <= 0) { depth = 0; drop.classList.remove("over"); } });
+  window.addEventListener("drop", (e) => {
+    e.preventDefault(); depth = 0; drop.classList.remove("over");
+    if (e.dataTransfer && e.dataTransfer.files.length) uploadAll(e.dataTransfer.files);
+  });
 }
 
 // ─── Копирование (читатель) ────────────────────────────────────────────────
