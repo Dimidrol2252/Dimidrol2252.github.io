@@ -69,13 +69,8 @@
   <button id="again" type="button">Проверить заново</button>
 
   <section class="card">
-    <h2>Firebase — на чём блокнот работает</h2>
+    <h2>Что доступно из этой сети</h2>
     <div id="fb"></div>
-  </section>
-
-  <section class="card">
-    <h2>MQTT-брокеры — прежний вариант, сейчас не используется</h2>
-    <div id="mq"></div>
   </section>
 
   <section class="card">
@@ -139,12 +134,6 @@
       host: "wss:// " + GHOST + ".firebaseio.com : 443",
       run: () => ws("wss://" + GHOST + ".firebaseio.com/.ws?v=5&ns=" + GHOST)
     }
-  ];
-
-  const MQTT = [
-    { key: "hivemq", name: "HiveMQ",    host: "broker.hivemq.com : 8884",   run: () => ws("wss://broker.hivemq.com:8884/mqtt", "mqtt") },
-    { key: "emqx",   name: "EMQX",      host: "broker.emqx.io : 8084",      run: () => ws("wss://broker.emqx.io:8084/mqtt", "mqtt") },
-    { key: "mosq",   name: "Mosquitto", host: "test.mosquitto.org : 8081",  run: () => ws("wss://test.mosquitto.org:8081/mqtt", "mqtt") }
   ];
 
   // ─── Проверки ─────────────────────────────────────────────────────────────
@@ -221,7 +210,6 @@
     all.forEach(function (c) { by[c.key] = c.result && c.result.ok; });
     const v = document.getElementById("verdict");
     const dbOk = by.db;
-    const mqttOk = by.hivemq || by.emqx || by.mosq;
 
     let html = "";
     if (dbOk && by.sdk) {
@@ -246,10 +234,6 @@
       html += "<p>Домен <code>firebasedatabase.app</code> недоступен — это базы европейского и азиатского регионов. Поэтому база и заведена в регионе us-central1, на <code>firebaseio.com</code>. Учитывайте, если будете создавать вторую.</p>";
     }
 
-    if (!mqttOk) {
-      html += "<p>MQTT-брокеры недоступны — из-за этого блокнот с них и перевели на Firebase. Сейчас они не используются, строки выше оставлены для справки.</p>";
-    }
-
     v.className = dbOk && by.sdk ? "good" : dbOk ? "mid" : "bad";
     v.innerHTML = html;
   }
@@ -258,8 +242,7 @@
     document.getElementById("verdict").className = "";
     document.getElementById("verdict").textContent = "Идёт проверка…";
     draw(document.getElementById("fb"), FIREBASE);
-    draw(document.getElementById("mq"), MQTT);
-    const all = FIREBASE.concat(MQTT);
+    const all = FIREBASE;
     Promise.all(all.map(function (c) {
       return c.run().then(function (res) { settle(c, res); });
     })).then(function () { verdict(all); });
