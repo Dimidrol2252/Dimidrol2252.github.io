@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Проверка сети — Общий блокнот</title>
+<style>
+  :root{
+    --bg:#f6f7f9; --card:#ffffff; --text:#16181d; --muted:#6b7280;
+    --line:#e4e7ec; --accent:#2f6df6; --ok:#16a34a; --warn:#d97706; --err:#dc2626;
+    --shadow:0 1px 2px rgba(16,24,40,.06),0 8px 24px rgba(16,24,40,.06);
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#0f1115; --card:#171a21; --text:#e8eaee; --muted:#9aa1ad;
+      --line:#262b34; --accent:#5b8cff;
+      --shadow:0 1px 2px rgba(0,0,0,.4),0 8px 24px rgba(0,0,0,.35);
+    }
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--bg); color:var(--text);
+    font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Inter,Arial,sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:860px; margin:0 auto; padding:28px 18px 64px}
+  h1{font-size:18px; margin:0 0 6px; font-weight:650; letter-spacing:-.01em}
+  .lead{margin:0 0 20px; font-size:14px; color:var(--muted)}
+  .card{
+    background:var(--card); border:1px solid var(--line); border-radius:14px;
+    box-shadow:var(--shadow); overflow:hidden; margin-bottom:16px;
+  }
+  .card h2{
+    margin:0; padding:12px 16px; border-bottom:1px solid var(--line);
+    font-size:13px; font-weight:650; color:var(--muted);
+  }
+  .row{display:flex; gap:12px; align-items:flex-start; padding:12px 16px; border-top:1px solid var(--line)}
+  .row:first-of-type{border-top:0}
+  .mark{width:20px; flex:none; text-align:center; font-size:15px; line-height:1.5}
+  .mark.wait{color:var(--muted)}
+  .mark.ok{color:var(--ok)}
+  .mark.bad{color:var(--err)}
+  .body{min-width:0; flex:1}
+  .nm{font-weight:600; font-size:14px}
+  .dt{font-size:12.5px; color:var(--muted); word-break:break-all; margin-top:2px}
+  .dt code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:12px}
+  #verdict{padding:16px; font-size:14.5px; line-height:1.6}
+  #verdict.good{border-left:3px solid var(--ok)}
+  #verdict.bad{border-left:3px solid var(--err)}
+  #verdict.mid{border-left:3px solid var(--warn)}
+  #verdict b{font-weight:650}
+  .foot{font-size:13px; color:var(--muted)}
+  .foot a{color:var(--accent)}
+  button{
+    font:inherit; font-size:13px; padding:7px 14px; border-radius:8px; cursor:pointer;
+    border:1px solid var(--line); background:var(--card); color:var(--text); margin-bottom:16px;
+  }
+  button:hover{border-color:var(--accent); color:var(--accent)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Проверка сети</h1>
+  <p class="lead">
+    Показывает, что именно доступно из этой сети. Ничего создавать и настраивать не нужно —
+    проверка стучится к реальным хостам и читает их ответы. Запускается сама при открытии страницы.
+  </p>
+
+  <button id="again" type="button">Проверить заново</button>
+
+  <section class="card">
+    <h2>Firebase — если переводить блокнот на него</h2>
+    <div id="fb"></div>
+  </section>
+
+  <section class="card">
+    <h2>MQTT-брокеры — на чём блокнот работает сейчас</h2>
+    <div id="mq"></div>
+  </section>
+
+  <section class="card">
+    <h2>Вывод</h2>
+    <div id="verdict">Идёт проверка…</div>
+  </section>
+
+  <p class="foot">← <a href="./">вернуться к блокноту</a></p>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  const TIMEOUT = 12000;
+  // Проекта с таким именем не существует — Firebase честно ответит «404 Not Found».
+  // Нам важен сам факт ответа: он доказывает, что сеть пропускает до этих хостов.
+  const GHOST = "test-nonexistent-xyz";
+
+  const FIREBASE = [
+    {
+      key: "sdk",
+      name: "Библиотека Firebase",
+      host: "www.gstatic.com : 443",
+      run: () => https("https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js",
+                       (t) => t.indexOf("firebase") !== -1)
+    },
+    {
+      key: "db",
+      name: "База Firebase (HTTPS)",
+      host: GHOST + ".firebaseio.com : 443",
+      run: () => https("https://" + GHOST + ".firebaseio.com/.json",
+                       (t) => t.indexOf("404 Not Found") !== -1)
+    },
+    {
+      key: "eu",
+      name: "База Firebase, регион Европа",
+      host: GHOST + ".europe-west1.firebasedatabase.app : 443",
+      run: () => https("https://" + GHOST + ".europe-west1.firebasedatabase.app/.json",
+                       (t) => t.indexOf("404 Not Found") !== -1)
+    },
+    {
+      key: "ws",
+      name: "WebSocket к Firebase",
+      host: "wss:// " + GHOST + ".firebaseio.com : 443",
+      run: () => ws("wss://" + GHOST + ".firebaseio.com/.ws?v=5&ns=" + GHOST)
+    }
+  ];
+
+  const MQTT = [
+    { key: "hivemq", name: "HiveMQ",    host: "broker.hivemq.com : 8884",   run: () => ws("wss://broker.hivemq.com:8884/mqtt", "mqtt") },
+    { key: "emqx",   name: "EMQX",      host: "broker.emqx.io : 8084",      run: () => ws("wss://broker.emqx.io:8084/mqtt", "mqtt") },
+    { key: "mosq",   name: "Mosquitto", host: "test.mosquitto.org : 8081",  run: () => ws("wss://test.mosquitto.org:8081/mqtt", "mqtt") }
+  ];
+
+  // ─── Проверки ─────────────────────────────────────────────────────────────
+
+  // Ответ читаем целиком: если вместо хоста ответил блокирующий прокси,
+  // текст не совпадёт с ожидаемым и проверка честно провалится.
+  function https(url, looksRight) {
+    return new Promise(function (resolve) {
+      const ctl = new AbortController();
+      const t = setTimeout(function () { ctl.abort(); }, TIMEOUT);
+      const started = Date.now();
+      fetch(url, { cache: "no-store", signal: ctl.signal })
+        .then(function (r) { return r.text().then(function (txt) { return { r: r, txt: txt }; }); })
+        .then(function (o) {
+          clearTimeout(t);
+          const ms = Date.now() - started;
+          if (looksRight(o.txt)) resolve({ ok: true, info: "ответил за " + ms + " мс (HTTP " + o.r.status + ")" });
+          else resolve({ ok: false, info: "ответ пришёл, но не от этого сервиса — похоже на страницу прокси (HTTP " + o.r.status + ")" });
+        })
+        .catch(function (e) {
+          clearTimeout(t);
+          resolve({ ok: false, info: e.name === "AbortError" ? "нет ответа за 12 секунд" : "соединение не установлено (" + e.message + ")" });
+        });
+    });
+  }
+
+  function ws(url, proto) {
+    return new Promise(function (resolve) {
+      const started = Date.now();
+      let done = false;
+      let sock;
+      const finish = function (ok, info) {
+        if (done) return;
+        done = true;
+        try { sock && sock.close(); } catch (e) {}
+        resolve({ ok: ok, info: info });
+      };
+      const t = setTimeout(function () { finish(false, "нет ответа за 12 секунд"); }, TIMEOUT);
+      try { sock = proto ? new WebSocket(url, proto) : new WebSocket(url); }
+      catch (e) { clearTimeout(t); return finish(false, "не удалось открыть (" + e.message + ")"); }
+      sock.onopen = function () { clearTimeout(t); finish(true, "соединение открылось за " + (Date.now() - started) + " мс"); };
+      sock.onerror = function () { clearTimeout(t); finish(false, "соединение отклонено или заблокировано"); };
+      sock.onclose = function (e) { clearTimeout(t); finish(false, "закрыто сразу" + (e.code ? " (код " + e.code + ")" : "")); };
+    });
+  }
+
+  // ─── Отрисовка ────────────────────────────────────────────────────────────
+  function draw(container, list) {
+    container.innerHTML = "";
+    list.forEach(function (c) {
+      const row = document.createElement("div");
+      row.className = "row";
+      row.innerHTML =
+        '<span class="mark wait">•</span>' +
+        '<span class="body"><span class="nm"></span>' +
+        '<div class="dt"><code></code> — <span class="st">проверяю…</span></div></span>';
+      row.querySelector(".nm").textContent = c.name;
+      row.querySelector("code").textContent = c.host;
+      container.appendChild(row);
+      c.el = { mark: row.querySelector(".mark"), st: row.querySelector(".st") };
+    });
+  }
+
+  function settle(c, res) {
+    c.result = res;
+    c.el.mark.className = "mark " + (res.ok ? "ok" : "bad");
+    c.el.mark.textContent = res.ok ? "✓" : "✗";
+    c.el.st.textContent = res.info;
+  }
+
+  function verdict(all) {
+    const by = {};
+    all.forEach(function (c) { by[c.key] = c.result && c.result.ok; });
+    const v = document.getElementById("verdict");
+    const mqttOk = by.hivemq || by.emqx || by.mosq;
+    const dbOk = by.db || by.eu;
+
+    let html = "";
+    if (mqttOk) {
+      html += "<p><b>Блокнот в этой сети работает как есть.</b> Хотя бы один MQTT-брокер доступен, ничего менять не нужно.</p>";
+    } else {
+      html += "<p><b>Блокнот в этой сети не работает:</b> ни один MQTT-брокер недоступен — сеть режет нестандартные порты 8884 / 8084 / 8081.</p>";
+    }
+
+    if (dbOk && by.sdk) {
+      html += "<p><b>Firebase здесь доступен</b> — и библиотека, и сама база отвечают по 443 порту. Перевод блокнота на Firebase решит проблему.</p>";
+    } else if (dbOk && !by.sdk) {
+      html += "<p><b>Firebase доступен частично:</b> база отвечает, а библиотеку с <code>www.gstatic.com</code> сеть не отдаёт. Это лечится — библиотеку можно положить в сам репозиторий и грузить с этого же сайта.</p>";
+    } else {
+      html += "<p><b>Firebase здесь тоже недоступен</b> — база не отвечает даже по 443. Значит сеть работает по белому списку сайтов, и любой внешний сервис будет закрыт. Остаётся либо просить админов открыть конкретный домен, либо поднимать свой сервер внутри этой сети.</p>";
+    }
+
+    if (dbOk && !by.ws) {
+      html += "<p>WebSocket к Firebase не прошёл, но это не помеха: библиотека Firebase сама переключается на обычные HTTPS-запросы, когда WebSocket недоступен. Будет чуть медленнее — задержка в пару секунд вместо мгновенной.</p>";
+    }
+
+    v.className = dbOk || mqttOk ? (mqttOk ? "good" : "mid") : "bad";
+    v.innerHTML = html;
+  }
+
+  function runAll() {
+    document.getElementById("verdict").className = "";
+    document.getElementById("verdict").textContent = "Идёт проверка…";
+    draw(document.getElementById("fb"), FIREBASE);
+    draw(document.getElementById("mq"), MQTT);
+    const all = FIREBASE.concat(MQTT);
+    Promise.all(all.map(function (c) {
+      return c.run().then(function (res) { settle(c, res); });
+    })).then(function () { verdict(all); });
+  }
+
+  document.getElementById("again").addEventListener("click", runAll);
+  runAll();
+})();
+</script>
+</body>
+</html>
